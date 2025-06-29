@@ -18,22 +18,50 @@ export class RedisService implements DataStore {
     port: number;
     username: string;
     password?: string;
+    tls?: boolean;
+    connectTimeout?: number;
+    reconnectStrategy?: boolean | number;
   }) {
+    // Default connection timeout to 5 seconds if not provided
+    const connectTimeout = config.connectTimeout || 5000;
+    
+    // Default reconnect strategy if not provided (retry after 1s, max 10 retries)
+    const reconnectStrategy = config.reconnectStrategy !== undefined 
+      ? config.reconnectStrategy 
+      : (retries: number) => retries > 10 ? false : Math.min(retries * 1000, 10000);
+    
     this.redis = createClient({
       username: config.username,
       password: config.password,
       socket: {
         host: config.host,
-        port: config.port
+        port: config.port,
+        tls: config.tls === true,
+        connectTimeout,
+        reconnectStrategy
       }
     });
+    
     this.redis.on('error', (err) => {
-      console.error('redis error:', err);
+      logMessage('error', `Redis connection error: ${err.message}`);
     });
+    
     this.redis.on('connect', () => {
-      logMessage('info', '🔥 redis connected');
+      logMessage('info', '🔥 Redis connected successfully');
     });
-    this.redis.connect();
+    
+    this.redis.on('reconnecting', () => {
+      logMessage('warn', 'Redis reconnecting after connection loss');
+    });
+    
+    // Connect with error handling
+    (async () => {
+      try {
+        await this.redis.connect();
+      } catch (error) {
+        logMessage('error', `Failed to connect to Redis: ${error.message}`);
+      }
+    })();
   }
 
   private getKey(prefix: string, id: string, orgId: string): string {
@@ -65,16 +93,33 @@ export class RedisService implements DataStore {
   async listApiConfigs(limit = 10, offset = 0, orgId?: string): Promise<{ items: ApiConfig[], total: number }> {
     const pattern = this.getPattern(this.API_PREFIX, orgId);
     const keys = await this.redis.keys(pattern);
+    const total = keys.length;
+    
+    if (total === 0) {
+      return { items: [], total: 0 };
+    }
+    
     const slicedKeys = keys.slice(offset, offset + limit);
-
-    const configs = await Promise.all(
-      slicedKeys.map(async (key) => {
-        const data = await this.redis.get(key);
-        const id = key.split(':').pop()!.replace(this.API_PREFIX, '');
-        return parseWithId(data, id);
-      })
-    );
-    return { items: configs.filter((config): config is ApiConfig => config !== null), total: keys.length };
+    
+    // Use Redis pipeline for batch retrieval
+    const pipeline = this.redis.multi();
+    for (const key of slicedKeys) {
+      pipeline.get(key);
+    }
+    
+    const results = await pipeline.exec();
+    
+    // Process results
+    const configs = results.map((result, index) => {
+      const data = result;
+      const id = slicedKeys[index].split(':').pop()!.replace(this.API_PREFIX, '');
+      return parseWithId(data, id);
+    });
+    
+    return { 
+      items: configs.filter((config): config is ApiConfig => config !== null), 
+      total 
+    };
   }
 
   async upsertApiConfig(id: string, config: ApiConfig, orgId: string): Promise<ApiConfig> {
@@ -100,16 +145,33 @@ export class RedisService implements DataStore {
   async listExtractConfigs(limit = 10, offset = 0, orgId: string): Promise<{ items: ExtractConfig[], total: number }> {
     const pattern = this.getPattern(this.EXTRACT_PREFIX, orgId);
     const keys = await this.redis.keys(pattern);
+    const total = keys.length;
+    
+    if (total === 0) {
+      return { items: [], total: 0 };
+    }
+    
     const slicedKeys = keys.slice(offset, offset + limit);
-
-    const configs = await Promise.all(
-      slicedKeys.map(async (key) => {
-        const data = await this.redis.get(key);
-        const id = key.split(':').pop()!.replace(this.EXTRACT_PREFIX, '');
-        return parseWithId(data, id);
-      })
-    );
-    return { items: configs.filter((config): config is ExtractConfig => config !== null), total: keys.length };
+    
+    // Use Redis pipeline for batch retrieval
+    const pipeline = this.redis.multi();
+    for (const key of slicedKeys) {
+      pipeline.get(key);
+    }
+    
+    const results = await pipeline.exec();
+    
+    // Process results
+    const configs = results.map((result, index) => {
+      const data = result;
+      const id = slicedKeys[index].split(':').pop()!.replace(this.EXTRACT_PREFIX, '');
+      return parseWithId(data, id);
+    });
+    
+    return { 
+      items: configs.filter((config): config is ExtractConfig => config !== null), 
+      total 
+    };
   }
 
   async upsertExtractConfig(id: string, config: ExtractConfig, orgId?: string): Promise<ExtractConfig> {
@@ -135,16 +197,33 @@ export class RedisService implements DataStore {
   async listTransformConfigs(limit = 10, offset = 0, orgId?: string): Promise<{ items: TransformConfig[], total: number }> {
     const pattern = this.getPattern(this.TRANSFORM_PREFIX, orgId);
     const keys = await this.redis.keys(pattern);
+    const total = keys.length;
+    
+    if (total === 0) {
+      return { items: [], total: 0 };
+    }
+    
     const slicedKeys = keys.slice(offset, offset + limit);
-
-    const configs = await Promise.all(
-      slicedKeys.map(async (key) => {
-        const data = await this.redis.get(key);
-        const id = key.split(':').pop()!.replace(this.TRANSFORM_PREFIX, '');
-        return parseWithId(data, id);
-      })
-    );
-    return { items: configs.filter((config): config is TransformConfig => config !== null), total: keys.length };
+    
+    // Use Redis pipeline for batch retrieval
+    const pipeline = this.redis.multi();
+    for (const key of slicedKeys) {
+      pipeline.get(key);
+    }
+    
+    const results = await pipeline.exec();
+    
+    // Process results
+    const configs = results.map((result, index) => {
+      const data = result;
+      const id = slicedKeys[index].split(':').pop()!.replace(this.TRANSFORM_PREFIX, '');
+      return parseWithId(data, id);
+    });
+    
+    return { 
+      items: configs.filter((config): config is TransformConfig => config !== null), 
+      total 
+    };
   }
 
   async upsertTransformConfig(id: string, config: TransformConfig, orgId?: string): Promise<TransformConfig> {
@@ -313,19 +392,32 @@ export class RedisService implements DataStore {
     try {
       const pattern = this.getPattern(this.WORKFLOW_PREFIX, orgId);
       const keys = await this.redis.keys(pattern);
+      const total = keys.length;
+      
+      if (total === 0) {
+        return { items: [], total: 0 };
+      }
+      
       const slicedKeys = keys.slice(offset, offset + limit);
-
-      const workflows = await Promise.all(
-        slicedKeys.map(async (key) => {
-          const data = await this.redis.get(key);
-          const id = key.split(':').pop()?.replace(this.WORKFLOW_PREFIX, '');
-          return parseWithId(data, id);
-        })
-      );
-
+      
+      // Use Redis pipeline for batch retrieval
+      const pipeline = this.redis.multi();
+      for (const key of slicedKeys) {
+        pipeline.get(key);
+      }
+      
+      const results = await pipeline.exec();
+      
+      // Process results
+      const workflows = results.map((result, index) => {
+        const data = result;
+        const id = slicedKeys[index].split(':').pop()?.replace(this.WORKFLOW_PREFIX, '');
+        return parseWithId(data, id);
+      });
+      
       return {
         items: workflows.filter((workflow): workflow is Workflow => workflow !== null),
-        total: keys.length
+        total
       };
     } catch (error) {
       console.error('Error listing workflows:', error);
@@ -370,16 +462,33 @@ export class RedisService implements DataStore {
   async listIntegrations(limit = 10, offset = 0, orgId?: string): Promise<{ items: Integration[], total: number }> {
     const pattern = this.getPattern(this.INTEGRATION_PREFIX, orgId);
     const keys = await this.redis.keys(pattern);
+    const total = keys.length;
+    
+    if (total === 0) {
+      return { items: [], total: 0 };
+    }
+    
     const slicedKeys = keys.slice(offset, offset + limit);
-
-    const integrations = await Promise.all(
-      slicedKeys.map(async (key) => {
-        const data = await this.redis.get(key);
-        const id = key.split(':').pop()!.replace(this.INTEGRATION_PREFIX, '');
-        return parseWithId(data, id);
-      })
-    );
-    return { items: integrations.filter((i): i is Integration => i !== null), total: keys.length };
+    
+    // Use Redis pipeline for batch retrieval
+    const pipeline = this.redis.multi();
+    for (const key of slicedKeys) {
+      pipeline.get(key);
+    }
+    
+    const results = await pipeline.exec();
+    
+    // Process results
+    const integrations = results.map((result, index) => {
+      const data = result;
+      const id = slicedKeys[index].split(':').pop()!.replace(this.INTEGRATION_PREFIX, '');
+      return parseWithId(data, id);
+    });
+    
+    return { 
+      items: integrations.filter((i): i is Integration => i !== null), 
+      total 
+    };
   }
 
   async upsertIntegration(id: string, integration: Integration, orgId?: string): Promise<Integration> {
